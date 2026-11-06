@@ -5,23 +5,19 @@ from sqlalchemy import pool
 
 from alembic import context
 
-import models  # noqa: F401 — registers all tables in Base.metadata
+import models  # noqa: F401
 from config import settings
 from db import Base
 
-# Alembic Config object
 config = context.config
 
-# Interpret the config file for Python logging.
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# "What the schema should be"
 target_metadata = Base.metadata
 
 
 def run_migrations_offline() -> None:
-    """Run migrations in 'offline' mode."""
     context.configure(
         url=settings.database_url,
         target_metadata=target_metadata,
@@ -34,7 +30,6 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
-    """Run migrations in 'online' mode."""
     connectable = create_engine(
         settings.database_url,
         poolclass=pool.NullPool,

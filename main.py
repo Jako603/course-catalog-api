@@ -29,7 +29,6 @@ app.add_middleware(
 
 SessionDep = Annotated[Session, Depends(get_db)]
 
-# Constraint name -> (HTTP status, message)
 CONSTRAINT_ERRORS = {
     "students_email_key": (409, "Student with this email already exists"),
     "enrollments_course_id_student_id_key": (409, "Student is already enrolled in this course"),
