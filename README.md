@@ -1,43 +1,108 @@
-# Course Catalog API
+# course-catalog-api
 
-A REST API for the course catalog, built with FastAPI and Pydantic.
+Backend of the course catalog: FastAPI, SQLAlchemy 2.1, PostgreSQL, and Alembic migrations (Labs 4–7 of "Advanced Web Technologies").
 
 ## How to run
 
+You need Python 3.11 or newer and PostgreSQL 16 or newer.
+
+Once, as the `postgres` superuser, create the role and the database:
+
+```sql
+CREATE ROLE catalog_app LOGIN PASSWORD 'change-me';
+CREATE DATABASE course_catalog OWNER catalog_app;
+```
+
+Then, from the project folder:
+
 ```bash
-cd course-catalog-api
+# 1. Create and activate virtual environment
 python -m venv .venv
 .venv\Scripts\Activate.ps1        # Windows PowerShell
-# source .venv/bin/activate        # macOS / Linux
+# source .venv/bin/activate       # macOS / Linux
+
+# 2. Install dependencies
 pip install -r requirements.txt
+
+# 3. Create .env from the example
+copy .env.example .env            # Windows
+# cp .env.example .env            # macOS / Linux
+
+# 4. Apply migrations (creates all tables)
+alembic upgrade head
+
+# 5. Load initial data
+psql -h localhost -U catalog_app -d course_catalog -v ON_ERROR_STOP=1 -f seed.sql
+
+# 6. Start the server
 fastapi dev main.py
 ```
 
-Open http://127.0.0.1:8000/docs for interactive documentation.
+API documentation: http://localhost:8000/docs
 
-## What changed in Lab 5
+The password `change-me` is for teaching; in a real project, passwords are never put into the repository.
 
-- CORS enabled for `http://localhost:3000` — required so the browser can send requests from the Next.js frontend to a different origin (port 8000)
-- camelCase JSON via `CamelModel` with `alias_generator=to_camel` — frontend `Course` type uses `isElective`, backend Python uses `is_elective`; Pydantic translates automatically
-- `POST /courses/{course_id}/like` — increments likes counter, returns updated course
-- `POST /enrollments` — accepts `{ courseId, studentName }`, returns `{ id, courseId, studentName }` with status 201; validates `studentName` min 2 chars
-- `GET /enrollments` — lists all in-memory enrollments
+---
 
-## What was verified
+## What changed in the API
 
-| Request | Result |
-|---|---|
-| `GET /` | `{"message": "Course Catalog API is running"}` |
-| `GET /courses` | 6 courses, camelCase keys, ai-integration first (32 likes) |
-| `GET /courses?is_elective=true` | 2 courses: ai-integration, api-design |
-| `GET /courses?is_elective=false` | 4 courses |
-| `GET /courses?sort=title` | 6 courses alphabetically |
-| `GET /courses?page=2&page_size=2` | web-security, backend-fastapi |
-| `GET /courses/web-security` | web-security course object |
-| `GET /courses/nope` | 404 `{"detail": "Course not found"}` |
-| `POST /courses/web-security/like` | 200, likes incremented |
-| `POST /courses/nope/like` | 404 |
-| `POST /enrollments` valid body | 201, enrollment with id |
-| `POST /enrollments` name "A" | 422, validation error |
-| `POST /enrollments` unknown course | 404 |
-| `GET /enrollments` | list of enrollments |
+- **Data is now stored in PostgreSQL.** When the server restarts, all data (courses, students, enrollments, likes) is preserved. Before Lab 7, everything lived in Python lists and was lost on every restart.
+- **`POST /enrollments` now takes `studentId`** (an integer) instead of `studentName`. A student must be created first with `POST /students`, then enrolled.
+- **New routes:** `POST /students` creates a student, `GET /stats/courses` returns enrollment counts per course including courses with zero enrollments.
+- **`GET /enrollments`** now returns `courseTitle` and `studentName` from a SQL JOIN instead of just IDs.
+- **`level` field** added to courses: `beginner` or `intermediate`. Filter with `GET /courses?level=beginner`.
+- **Database constraint violations return proper HTTP responses:** 409 for duplicate email or enrollment, 404 for nonexistent course or student.
+
+---
+
+## Migrations
+
+| Command | What it does |
+|---------|--------------|
+| `alembic upgrade head` | applies all missing migrations |
+| `alembic downgrade -1` | rolls back the last migration |
+| `alembic current` | shows the current version of the database |
+| `alembic history` | shows the chain of migrations |
+| `alembic revision --autogenerate -m "text"` | writes a draft migration from models vs. database |
+| `alembic check` | reports whether models and database have diverged |
+| `alembic upgrade 0001:0002 --sql` | prints the SQL of a migration without running it |
+| `alembic stamp head` | marks the database as up to date without running migrations |
+
+---
+
+## Experiment log
+
+| # | Experiment | What I saw | Cause | How I fixed it |
+|---|------------|------------|-------|----------------|
+| 1 | Changed `uq` template in `naming_convention` to `%(table_name)s_%(column_0_name)s_unique` | `names only in models: ['enrollments_course_id_unique', 'students_email_unique']` and `names only in database: ['enrollments_course_id_student_id_key', 'students_email_key']` | The template produced different names from what PostgreSQL created — models and database disagreed | Restored the original template `%(table_name)s_%(column_0_N_name)s_key` |
+| 2 | Removed `min_length=2` from `StudentIn`, sent name `N` | `500 Internal Server Error` — `IntegrityError: students_name_check` in server log | Pydantic no longer blocked the short name; it reached the database; `students_name_check` is not in `CONSTRAINT_ERRORS` so it raised a 500 | Restored `Field(min_length=2)` — Pydantic must catch it first; CHECK is the second line of defense |
+| 3 | Renamed key `students_email_key` to `students_email_uniq` in `CONSTRAINT_ERRORS` | `500 Internal Server Error` for duplicate email | Constraint name from the database was `students_email_key` but the dictionary had `students_email_uniq` — no match, re-raised as 500 | Restored the correct key name |
+| 4 | Ran `ALTER TABLE courses ALTER COLUMN title DROP NOT NULL` in psql, then `alembic check` | `FAILED: New upgrade operations detected: modify_nullable on courses.title` | The model requires NOT NULL but the database didn't — mismatch detected | Ran `ALTER TABLE courses ALTER COLUMN title SET NOT NULL` to restore, then `alembic check` showed clean |
+| 5 | Ran autogenerated migration 0002 (NOT NULL column, no NULL fill) on table with rows | `IntegrityError: column "level" contains null values` — migration rolled back | Cannot add a NOT NULL column to a non-empty table without first filling existing rows | Rewrote migration as three steps: add nullable → fill rows → set NOT NULL |
+| 6 | Commented out `import models` in `alembic/env.py`, ran `alembic revision --autogenerate` | Detected removed table for all 3 tables — migration proposed to DROP everything | Without `import models`, `Base.metadata` is empty — Alembic thinks all tables are extra | Deleted the dangerous migration file, restored `import models` |
+| 7 | Added `phone: Mapped[str \| None]` to `Student` model without a migration, ran `alembic check` | `FAILED: Detected added column 'students.phone'` | Model has `phone` but database doesn't — model outpaced the database | Removed the `phone` field from the model |
+| 8 | Created two migrations (0003, 0004) both branching from 0002, ran `alembic upgrade head` | `FAILED: Multiple head revisions are present` | Two branches from same parent creates two heads — Alembic doesn't know which to apply | Ran `alembic merge heads -m "merge"` to create a merge migration, then deleted experimental files |
+
+---
+
+## Decisions
+
+- **The API response is chosen by the constraint name, not by SQLSTATE.** SQLSTATE `23505` means "uniqueness violated" — but we have two UNIQUE constraints (`students_email_key` and `enrollments_course_id_student_id_key`) that need different messages. The constraint name identifies exactly which rule fired. The error is caught after `commit()` because checking with a SELECT beforehand is a race condition: another request could take the email between the check and the insert.
+
+- **A like uses `UPDATE courses SET likes = likes + 1`, not read-then-write.** If two requests read `likes = 11` simultaneously, both compute 12 and write 12 — one like is lost. With `likes = likes + 1`, the database itself adds the value inside a locked row; the second UPDATE waits and adds to the already-incremented value, giving 13.
+
+- **Migration 0002 is split into three steps** because PostgreSQL cannot add a `NOT NULL` column to a table that already has rows — there is no value for the existing rows. The three steps are: (1) add the column as nullable, (2) fill existing rows with a rule, (3) set NOT NULL. All three run in one transaction, so any failure leaves the database at version 0001.
+
+---
+
+## Migration 0002 self-check
+
+| What to check | Result |
+|---------------|--------|
+| Goal and steps | ✅ Goal: add `level` column. Three steps: add nullable, fill rows, set NOT NULL. Clear and minimal. |
+| Data | ✅ Existing rows filled by rule: elective → `beginner`, non-elective → `intermediate`. No data lost. |
+| Renames and drops | ✅ No renames or drops. Only adds a column. |
+| Rollback | ✅ `downgrade()` drops the column. Data in `level` is lost on rollback — acceptable since it is derived from `is_elective`. |
+| Verification | ✅ `--sql` output reviewed. `downgrade -1 → upgrade head` cycle tested and passed. `alembic check` clean. |
+| History | ✅ Single head (0002). Migration committed together with model and schema changes. |
+| Application | ✅ `CourseOut` schema updated with `level` field. `seed.sql` updated. `GET /courses?level=` filter added. |
